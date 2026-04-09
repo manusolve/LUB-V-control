@@ -1,21 +1,25 @@
 FUNCTION_BLOCK "ProcessLUBVGreaser"
 { S7_Optimized_Access := 'TRUE' }
-VERSION : 0.3
+VERSION : 0.4
    VAR_INPUT 
       i_DevicePin4 : Bool;   // LUB-V PIN 4 output (ready / pulse feedback)
+      cfg_FillingCycles : Int := 40;   // number of 100 ms strokes for a filling cycle
    END_VAR
 
    VAR 
       q_ControlPulse : Bool;   // drive LUB-V PIN 2 high for timed pulse
       cmd_LubricationStroke : Bool;   // request 1 lubrication stroke (100 ms pulse)
-      cmd_Filling : Bool;   // request filling cycle (900 ms pulse)
-      cmd_CancelFilling : Bool;   // cancel active filling (1000 ms pulse)
+      cmd_Filling : Bool;   // request filling cycle (repeated 100 ms strokes)
+      cmd_CancelFilling : Bool;   // cancel active filling loop after current stroke
       cmd_StatusRequest : Bool;   // status request / sign of presence (1600 ms pulse)
       cmd_AcknowledgeError : Bool;   // acknowledge error (1700 ms pulse)
       status_Busy : Bool;   // state machine is processing
       status_Ready : Bool;   // idle, device ready, accepting commands
       status_DeviceNotReady : Bool;   // PIN 4 not qualified (steady HIGH >500 ms)
-      isFillingCanceled : Bool;   // response: 1 edge change
+      status_FillingActive : Bool;   // currently executing filling loop
+      status_StrokesDone : Int;   // completed strokes in current filling cycle
+      status_StrokesTarget : Int;   // total strokes requested for filling cycle
+      isFillingCanceled : Bool;   // filling loop was canceled by cmd_CancelFilling
       isLubeStrokeOK : Bool;   // response: 2 edge changes
       isLubeStrokeOK_CartLow : Bool;   // response: 3 edge changes - cartridge soon empty
       isOverpressure_Outlet1 : Bool;   // response: 4 edge changes - E2 outlet 1
@@ -31,10 +35,14 @@ VERSION : 0.3
       diag_QState : Int;   // expose qualification state for HMI
       state : Int;   // main state machine
       qState : Int;   // parallel qualification state machine
-      pulseWidth : Time;   // commanded pulse duration
-      edgeCount : Int;   // running edge change counter
+      pulseWidth : Time;   // commanded pulse duration (always t#100ms for lube/fill)
+      edgeCount : Int;   // running rising-edge counter
       prevPulseInput : Bool;   // previous scan value of PIN 4 for edge detection
       deviceQualified : Bool;   // device ready held steady >500 ms
+      strokesTarget : Int;   // total strokes for current operation (1 or cfg_FillingCycles)
+      strokesDone : Int;   // completed strokes so far
+      isFillingActive : Bool;   // currently in multi-stroke filling loop
+      cancelFillingRequest : Bool;   // latched cancel request received during filling
       re_cmdLube {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // rising edge: lubrication stroke
       re_cmdFill {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // rising edge: filling
       re_cmdCancel {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // rising edge: cancel filling
@@ -43,7 +51,7 @@ VERSION : 0.3
       tPulse {InstructionName := 'TON_TIME'; LibVersion := '1.0'} : TON_TIME;   // output pulse timer
       tReadyQual {InstructionName := 'TON_TIME'; LibVersion := '1.0'} : TON_TIME;   // device ready qualification timer
       tFeedbackTimeout {InstructionName := 'TON_TIME'; LibVersion := '1.0'} : TON_TIME;   // silence detector for end of pulse train
-      tLubeTimeout {InstructionName := 'TON_TIME'; LibVersion := '1.0'} : TON_TIME;   // overall response timeout
+      tLubeTimeout {InstructionName := 'TON_TIME'; LibVersion := '1.0'} : TON_TIME;   // overall response timeout (30 s per stroke, per protocol)
       tGap {InstructionName := 'TON_TIME'; LibVersion := '1.0'} : TON_TIME;   // inter-command gap timer
    END_VAR
 
@@ -76,7 +84,7 @@ BEGIN
 	        #deviceQualified := FALSE;
 	        
 	        IF #i_DevicePin4 THEN
-	            // PIN 4 just went HIGH - start qualification timer (one-shot)
+	            // PIN 4 just went HIGH - reset then start qualification timer (one-shot)
 	            "TimerReset"(#tReadyQual);
 	            "TimerStart"(timer := #tReadyQual,
 	                         PT := t#600ms);
@@ -87,25 +95,21 @@ BEGIN
 	        // 1 - QUALIFYING : PIN 4 is HIGH, waiting for 600 ms steady
 	        // -----------------------------------------------------------------
 	    1:
-	        // keep timer running (TON needs IN=TRUE each scan)
-	        //"TimerStart"(timer := #tReadyQual,
-	        //            PT := t#600ms);
-	        
 	        IF NOT #i_DevicePin4 THEN
-	            // PIN 4 dropped before qualification - reset
+	            // PIN 4 dropped before qualification - reset and go back
 	            "TimerReset"(#tReadyQual);
 	            #deviceQualified := FALSE;
 	            #qState := 0;
 	        ELSIF #tReadyQual.Q THEN
-	            // qualified
+	            // qualified - 600 ms steady high confirmed
 	            #deviceQualified := TRUE;
 	            #qState := 2;
 	        END_IF;
 	        ;
 	        // -----------------------------------------------------------------
 	        // 2 - QUALIFIED : device is ready
-	        //     When main state machine is active (states 20-50), PIN 4
-	        //     will pulse - we freeze qualification during those states
+	        //     Freeze qualification monitoring while main SM is active
+	        //     (states 5-50) since PIN 4 will be pulsing during feedback
 	        // -----------------------------------------------------------------
 	    2:
 	        #deviceQualified := TRUE;
@@ -126,13 +130,19 @@ BEGIN
 	// =====================================================================
 	CASE #state OF
 	        // -----------------------------------------------------------------
-	        // 0 - IDLE : waiting for a command
+	        // 0 - IDLE : waiting for a command trigger
+	        //
+	        // Single lubrication stroke and filling cycle are unified:
+	        //   - Single stroke  : strokesTarget = 1
+	        //   - Filling cycle  : strokesTarget = cfg_FillingCycles (default 40)
+	        // Both send a 100 ms pulse per stroke, looping in state 50.
 	        // -----------------------------------------------------------------
 	    0:
 	        #q_ControlPulse := FALSE;
 	        #status_Busy := FALSE;
 	        #status_Ready := #deviceQualified;
 	        #status_DeviceNotReady := NOT #deviceQualified;
+	        #status_FillingActive := FALSE;
 	        
 	        // clear previous feedback valid/unknown flags
 	        #isValid := FALSE;
@@ -141,26 +151,56 @@ BEGIN
 	        IF #deviceQualified THEN
 	            // priority-encoded command acceptance
 	            IF #re_cmdLube.Q THEN
+	                // single lubrication stroke: one 100 ms pulse
 	                #pulseWidth := t#100ms;
+	                #strokesTarget := 1;
+	                #strokesDone := 0;
+	                #isFillingActive := FALSE;
+	                #cancelFillingRequest := FALSE;
 	                #state := 5;
 	            ELSIF #re_cmdFill.Q THEN
-	                #pulseWidth := t#900ms;
+	                // filling cycle: cfg_FillingCycles repetitions of 100 ms stroke.
+	                // The LUB-V hardware handles the 2-second relaxation phase internally
+	                // between strokes and only sends its response signal when ready for the
+	                // next command - so the 30 s tLubeTimeout per stroke already covers it.
+	                #pulseWidth := t#100ms;
+	                #strokesTarget := #cfg_FillingCycles;
+	                #strokesDone := 0;
+	                #isFillingActive := TRUE;
+	                #cancelFillingRequest := FALSE;
 	                #state := 5;
 	            ELSIF #re_cmdCancel.Q THEN
+	                // cancel filling: 1000 ms pulse (protocol hardware command; only needed if
+	                // the LUB-V is running its native 900 ms hardware filling mode externally).
+	                // To stop the PLC-controlled filling loop, assert cmd_CancelFilling while
+	                // the machine is in state 30-50 — the cancelFillingRequest flag will latch.
 	                #pulseWidth := t#1000ms;
+	                #strokesTarget := 0;
+	                #strokesDone := 0;
+	                #isFillingActive := FALSE;
+	                #cancelFillingRequest := FALSE;
 	                #state := 5;
 	            ELSIF #re_cmdStatus.Q THEN
 	                #pulseWidth := t#1600ms;
+	                #strokesTarget := 0;
+	                #strokesDone := 0;
+	                #isFillingActive := FALSE;
 	                #state := 5;
 	            ELSIF #re_cmdAckErr.Q THEN
 	                #pulseWidth := t#1700ms;
+	                #strokesTarget := 0;
+	                #strokesDone := 0;
+	                #isFillingActive := FALSE;
 	                #state := 5;
 	            END_IF;
 	        END_IF;
 	        ;
 	        
+	        // -----------------------------------------------------------------
+	        // 5 - RESET_TIMERS : one-shot timer reset before next stroke
+	        //     Called on first entry and at the start of each loop iteration
+	        // -----------------------------------------------------------------
 	    5:
-	        // reset timers for new run
 	        "TimerReset"(#tPulse);
 	        "TimerReset"(#tFeedbackTimeout);
 	        "TimerReset"(#tLubeTimeout);
@@ -169,17 +209,20 @@ BEGIN
 	        #state := 10;
 	        
 	        // -----------------------------------------------------------------
-	        // 10 - SEND_PULSE : assert output, reset counters (transition)
+	        // 10 - SEND_PULSE : assert output, start pulse timer (one-shot)
 	        // -----------------------------------------------------------------
 	    10:
 	        #status_Busy := TRUE;
 	        #status_Ready := FALSE;
+	        #status_FillingActive := #isFillingActive;
+	        #status_StrokesDone := #strokesDone;
+	        #status_StrokesTarget := #strokesTarget;
 	        #q_ControlPulse := TRUE;
 	        
 	        "TimerStart"(timer := #tPulse,
 	                     PT := #pulseWidth);
 	        
-	        // reset feedback state
+	        // reset feedback state for this stroke
 	        #edgeCount := 0;
 	        #prevPulseInput := #i_DevicePin4;
 	        
@@ -200,7 +243,7 @@ BEGIN
 	        #state := 20;
 	        ;
 	        // -----------------------------------------------------------------
-	        // 20 - WAIT_PULSE_DONE : hold output HIGH until timer expires
+	        // 20 - WAIT_PULSE_DONE : hold output HIGH until pulse timer expires
 	        // -----------------------------------------------------------------
 	    20:
 	        IF #tPulse.Q THEN
@@ -208,48 +251,47 @@ BEGIN
 	            // pulse complete - drop control signal
 	            #q_ControlPulse := FALSE;
 	            
-	            // one-shot: reset feedback and lube timeout timers for next state
-	            
+	            // one-shot: start feedback silence and lube timeout timers
 	            "TimerStart"(timer := #tFeedbackTimeout,
 	                         PT := t#500ms);
 	            
+	            // 30 s timeout per protocol; resets each stroke in filling loop
 	            "TimerStart"(timer := #tLubeTimeout,
-	                         PT := t#32s);
+	                         PT := t#30s);
 	            
-	           
 	            #state := 30;
 	        END_IF;
 	        ;
 	        // -----------------------------------------------------------------
-	        // 30 - WAIT_FEEDBACK : count edge changes on PIN 4
-	        //      LUB-V responds with 100 ms pulse train.
-	        //      Count both rising and falling edges (edge changes).
-	        //      When no new edge for >500 ms the train is complete.
+	        // 30 - WAIT_FEEDBACK : count RISING edges on PIN 4
+	        //      LUB-V responds with 5 Hz pulse train (100 ms HIGH, 100 ms LOW).
+	        //      Rising edge = low-to-high transition only (per protocol).
+	        //      When silence on PIN 4 for >500 ms, train is complete.
 	        // -----------------------------------------------------------------
-	
-	        
 	    30:
 	        #q_ControlPulse := FALSE;
 	        
-	        // edge detection on PIN 4
+	        // latch cancel request if signaled during filling loop
+	        IF #isFillingActive AND #re_cmdCancel.Q THEN
+	            #cancelFillingRequest := TRUE;
+	        END_IF;
 	        
+	        // rising edge detection on PIN 4
 	        IF #i_DevicePin4 AND NOT #prevPulseInput THEN
 	            #edgeCount := #edgeCount + 1;
 	            
-	            // restart silence timer on every edge (one-shot reset + start)
+	            // restart silence timer on every rising edge (one-shot reset + start)
 	            "TimerReset"(#tFeedbackTimeout);
 	            "TimerStart"(timer := #tFeedbackTimeout,
 	                         PT := t#500ms);
 	        END_IF;
-	        
-	        //#prevPulseInput := #i_DevicePin4;
 	        
 	        // silence timer expired and we have edges -> pulse train complete
 	        IF #tFeedbackTimeout.Q AND (#edgeCount > 0) THEN
 	            #state := 40;
 	        END_IF;
 	        
-	        // overall timeout with no response at all
+	        // overall timeout with no response at all -> fault
 	        IF #tLubeTimeout.Q AND (#edgeCount = 0) THEN
 	            #state := 99;
 	        END_IF;
@@ -291,30 +333,47 @@ BEGIN
 	        #state := 50;
 	        ;
 	        // -----------------------------------------------------------------
-	        // 50 - INTER_CMD_GAP : enforce >= 500 ms silence before next cmd
+	        // 50 - INTER_CMD_GAP : enforce >=500 ms silence before next command
+	        //
+	        //      After the gap, decide whether to loop for another stroke:
+	        //        - Continue if filling active, more strokes remain, no cancel,
+	        //          and the last stroke was successful (OK or cartridge low).
+	        //        - Otherwise return to IDLE. If the loop exits due to a fault
+	        //          (isOverpressure_Outlet1 etc.), those flags remain set so the
+	        //          HMI can distinguish normal completion from error-induced abort.
 	        // -----------------------------------------------------------------
 	    50:
-	        // done the command, reset and return
 	        IF #tGap.Q THEN
-	            
-	            #cmd_AcknowledgeError := false;
-	            #cmd_CancelFilling := false;
-	            #cmd_Filling := false;
-	            #cmd_LubricationStroke := false;
-	            #cmd_StatusRequest := false;
-	            
 	            "TimerReset"(#tGap);
-	            #state := 0;
+	            #strokesDone := #strokesDone + 1;
+	            
+	            IF #isFillingActive
+	               AND (#strokesDone < #strokesTarget)
+	               AND NOT #cancelFillingRequest
+	               AND (#isLubeStrokeOK OR #isLubeStrokeOK_CartLow) THEN
+	                // Continue filling loop - timers reset in state 5 before next stroke
+	                #state := 5;
+	            ELSE
+	                // Done - clear command flags and return to idle
+	                #cmd_AcknowledgeError := FALSE;
+	                #cmd_CancelFilling := FALSE;
+	                #cmd_Filling := FALSE;
+	                #cmd_LubricationStroke := FALSE;
+	                #cmd_StatusRequest := FALSE;
+	                #isFillingActive := FALSE;
+	                #state := 0;
+	            END_IF;
 	        END_IF;
 	        ;
 	        // -----------------------------------------------------------------
-	        // 99 - FAULT : device not ready or communication timeout
+	        // 99 - FAULT : communication timeout (no response within 30 s)
 	        // -----------------------------------------------------------------
 	    99:
 	        #q_ControlPulse := FALSE;
 	        #status_Busy := FALSE;
 	        #status_Ready := FALSE;
 	        #status_DeviceNotReady := TRUE;
+	        #isFillingActive := FALSE;
 	        
 	        // auto-recover when device ready re-qualifies
 	        IF #deviceQualified THEN
@@ -323,6 +382,7 @@ BEGIN
 	        ;
 	END_CASE;
 	
+	// Update edge-detection register at end of scan (after all edge checks above)
 	#prevPulseInput := #i_DevicePin4;
 	
 	// expose states for diagnostics / HMI

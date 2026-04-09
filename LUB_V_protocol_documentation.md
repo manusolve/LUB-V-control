@@ -1,112 +1,142 @@
-# LUB-V Greaser — PLC Control Protocol Documentation
+# LUB-V External Control (PLC) Protocol Documentation
 
 ## Overview
 
-The LUB-V is an automatic single-line lubrication pump. This document describes the digital I/O communication protocol between a Siemens S7-series PLC and the LUB-V unit.
+The LUB-V lubrication system can be controlled via an external PLC when switched to pulse mode. The system uses a 4-pin M12x1 female connector (A-coded) for communication.
+
+### ⚠️ SAFETY WARNING
+Machine elements that are not lubricated can cause failures resulting in serious injury or death.
+- A program corresponding to the communication protocol must be created in the PLC
+- After sending a control signal, the response signal must be waited for, evaluated and interpreted
+
+## Pin Assignment
+
+| PIN | Assignment | Standard M12 Color |
+|-----|------------|--------------------|
+| 1   | +24 V DC   | Brown              |
+| 2   | Input signal (from PLC to LUB-V) | White |
+| 3   | Ground     | Blue               |
+| 4   | Output signal (from LUB-V to PLC) | Black |
+
+### Important Notes
+- Maximum output current at PIN 4: Imax < 20mA
+- No inductive loads (e.g., relays) may be connected to PIN 4
+- The LUB-V can be completely switched off by removing supply voltage without losing settings
+- After long standstill, trigger "1 lubrication stroke" twice manually (100 ms)
 
 ---
 
-## Wiring / Pin Assignment
+## Input Signals (Control Signals from PLC)
 
-| PIN | Direction | Signal | Description |
-|-----|-----------|--------|-------------|
-| PIN 2 | LUB-V → PLC | Ready | HIGH when device is ready to accept a command |
-| PIN 3 | PLC → LUB-V | Control | PLC issues commands by asserting specific pulse widths |
-| PIN 4 | LUB-V → PLC | Feedback | LUB-V sends pulse train to report result |
+All control signals are sent as high level (+24 V DC) to PIN 2 with tolerance of ±25 milliseconds.
 
----
+| Signal Length (ms) | Function | Reference |
+|-------------------|----------|-----------|
+| 100 | 1 lubrication stroke | Chap. 8.2.1 |
+| 900 | Filling | Chap. 8.2.2 |
+| 1000 | Cancel filling | Chap. 8.2.3 |
+| 1600 | Status request (sign of presence) | Chap. 8.2.4 |
+| 1700 | Acknowledge error | Chap. 8.2.5 |
 
-## Ready Signal Qualification (PIN 2)
+### 1. Single Lubrication Stroke (100 ms)
 
-- The LUB-V asserts PIN 2 HIGH to indicate that it is ready for a command.
-- The PLC **must** confirm that PIN 2 has been continuously HIGH for **more than 500 ms** before treating the device as qualified/ready.
-- Recommended qualification hold time: **600 ms** (adds 20 % margin).
+![8.2.1.png](8.2.1.png)
 
----
+**Signal duration:** 75-125 ms
 
-## Control Signal — Command Encoding (PIN 3)
+**Prerequisites:**
+- LUB-V connected and powered
+- Pulse mode activated
+- No errors present
+- Ready signal (high level) present at PIN 4 for >500 ms
 
-Commands are issued by the PLC asserting PIN 3 HIGH for a precisely timed pulse duration. After the pulse, PIN 3 must return to LOW.
+**Operation:**
+- Delivers 0.15 ml of lubricant
+- Stroke duration: 7-17 seconds
+- Display shows back pressure: 1-70 bar
+- Wait >500 ms after response signal before sending next command
 
-| Pulse Width | Command |
-|-------------|---------|
-| 100 ms | Short trigger / acknowledge |
-| 900 ms | Medium command A |
-| 1 000 ms | Trigger single lubrication stroke |
-| 1 600 ms | Trigger extended / multi-stroke lubrication |
-| 1 700 ms | Full cycle command |
+### 2. Filling Function (900 ms)
 
-> **Note:** Pulse widths must be accurate to within ±50 ms. Use a PLC timer with millisecond resolution.
+![8.2.2.png](8.2.2.png)
 
----
+**Signal duration:** 875-925 ms
 
-## Feedback Signal — Response Encoding (PIN 4)
+**Operation:**
+- Executes 40 consecutive lubrication strokes
+- 2-second relaxation phase between strokes
+- Total volume: 6.0 ml (40 × 0.15 ml)
+- Only "Cancel filling" command accepted during execution
 
-After executing a command, the LUB-V sends a pulse train on PIN 4.
+### 3. Cancel Filling (1000 ms)
 
-- **Signal frequency:** 5 Hz (200 ms period — 100 ms HIGH, 100 ms LOW per pulse)
-- **Evaluation method:** Count **rising edges** (low-to-high transitions only)
-- **End of transmission:** Silence on PIN 4 for **≥ 500 ms** indicates the pulse train is complete
+![8.2.3.png](8.2.3.png)
 
-### Response Code Table
+**Signal duration:** 975-1025 ms
 
-| Rising-Edge Count | Meaning |
-|:-----------------:|---------|
-| 1 | Lubrication stroke started |
-| 2 | Past lubrication stroke OK — no fault |
-| 3 | Low-level warning (reservoir below minimum) |
-| 4 | Overpressure fault (E2) at outlet 1 |
-| 5 | Overpressure fault (E2) at outlet 2 |
-| 6 | General device fault |
-| 7 | Device not ready |
+**Operation:**
+- Stops filling function
+- Can only be sent during filling operation
+- If sent during a stroke, current stroke completes before cancellation
 
-> **Critical:** Counting both rising and falling edges (i.e. using `<>` comparison instead of `AND NOT`) will double the count, causing response codes to be misinterpreted.
+### 4. Status Request (1600 ms)
 
----
+![8.2.4.png](8.2.4.png)
 
-## Timing Requirements
+**Signal duration:** 1575-1625 ms
 
-| Parameter | Minimum | Recommended |
-|-----------|---------|-------------|
-| Ready qualification hold time | 500 ms | 600 ms |
-| Overall response timeout (PLC must receive feedback) | — | **30 s** |
-| Post-response inter-command gap | 500 ms | 600 ms |
-| Feedback silence window (end-of-train detection) | 500 ms | 500 ms |
+**Operation:**
+- Checks last status of LUB-V
+- Repeats output signal of past lubrication stroke
+- Can be used to cyclically verify LUB-V is reachable
 
-> The LUB-V **guarantees** to send its response within **30 seconds** of receiving the control signal. The PLC timeout must therefore be set to at least 30 s.
+### 5. Acknowledge Error (1700 ms)
 
----
+![8.2.5.png](8.2.5.png)
 
-## State Machine Summary
+**Signal duration:** 1675-1725 ms
 
-The recommended PLC implementation uses the following states:
-
-```
-qState machine (qualification):
-  qState 0  → PIN 2 LOW  : device not ready, reset qualify timer
-  qState 10 → PIN 2 HIGH : start 600 ms qualify timer
-  qState 20 → Timer done  : deviceQualified = TRUE
-
-Main state machine:
-  State  0  → Idle, wait for trigger and deviceQualified = TRUE
-  State 10  → Assert PIN 3 HIGH, start pulse timer
-  State 20  → Pulse complete, PIN 3 LOW, reset & start tLubeTimeout (30 s)
-  State 30  → Count rising edges on PIN 4 until 500 ms silence
-  State 40  → Decode edgeCount → set outputs (LubeOK / FaultCode)
-  State 50  → Wait 600 ms inter-command gap, return to State 0
-```
+**Operation:**
+- Acknowledges E2 (overpressure) or E3 (over/undervoltage) errors
+- Only command accepted when error is present
+- Cause of error must be identified and eliminated before acknowledgment
+- LUB-V performs internal self-check after acknowledgment
 
 ---
 
-## Fault Handling
+## Output Signals (Response from LUB-V)
 
-- If `tLubeTimeout` (30 s) expires before the feedback is received, set `o_Fault = TRUE` and `o_FaultCode = 99` (timeout fault).
-- The function block should latch faults until an external reset input is asserted.
+Output signals are transmitted via PIN 4 as edge changes from low level (0-5 V DC) to high level (+17 to +27 V DC).
+
+**Frequency:** 5 Hz  
+**Evaluation method:** Count rising edges (low to high transitions)
+
+### Output Signal Codes
+
+| Edge Changes | Information | Remedy |
+|--------------|-------------|--------|
+| 1 | Filling function canceled | None necessary (informative) |
+| 2 | Past lubrication stroke OK | None necessary (informative) |
+| 3 | Past lubrication stroke OK, cartridge soon empty | Buy new cartridge in time |
+| 4 | Overpressure (E2) at outlet 1 | Check lubrication point, eliminate cause, acknowledge error |
+| 5 | Overpressure (E2) at outlet 2 (if present) | Check lubrication point, eliminate cause, acknowledge error |
+| 12 | Cartridge empty | Change cartridge (automatically cleared after shutdown) |
+| 14 | Over-/undervoltage (E3) | Check power supply, acknowledge error |
+| 15 | Internal device error (E4) | Return to manufacturer with description |
+| 16 | Inadmissible/undefined control signal received | Check PLC program for correctness |
+
+### Timing Requirements
+- Wait >500 ms after output signal before sending next control signal
+- LUB-V sends response within 30 seconds of control signal
+- If no response after 30 seconds, send status request
+- If still no response, disconnect power for 10 seconds and retry
 
 ---
 
-## Revision History
+## Communication Protocol Notes
 
-| Version | Date | Notes |
-|---------|------|-------|
-| 0.33 | — | Initial release; see `FB_LUB_V_Greaser_V033_Fixed.scl.st` for corrected version |
+1. **Ready State:** High level permanently present at PIN 4 indicates readiness
+2. **Processing Time:** No control signals processed during operation (wait for response)
+3. **Timeout Handling:** If no response after 30 sec, check with status request
+4. **Error Recovery:** Disconnect power for 10 sec if communication fails completely
+5. **Low Level at PIN 4:** Indicates cable problem or serious device error
