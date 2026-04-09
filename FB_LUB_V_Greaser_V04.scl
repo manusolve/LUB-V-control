@@ -1,0 +1,333 @@
+FUNCTION_BLOCK "ProcessLUBVGreaser"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.3
+   VAR_INPUT 
+      i_DevicePin4 : Bool;   // LUB-V PIN 4 output (ready / pulse feedback)
+   END_VAR
+
+   VAR 
+      q_ControlPulse : Bool;   // drive LUB-V PIN 2 high for timed pulse
+      cmd_LubricationStroke : Bool;   // request 1 lubrication stroke (100 ms pulse)
+      cmd_Filling : Bool;   // request filling cycle (900 ms pulse)
+      cmd_CancelFilling : Bool;   // cancel active filling (1000 ms pulse)
+      cmd_StatusRequest : Bool;   // status request / sign of presence (1600 ms pulse)
+      cmd_AcknowledgeError : Bool;   // acknowledge error (1700 ms pulse)
+      status_Busy : Bool;   // state machine is processing
+      status_Ready : Bool;   // idle, device ready, accepting commands
+      status_DeviceNotReady : Bool;   // PIN 4 not qualified (steady HIGH >500 ms)
+      isFillingCanceled : Bool;   // response: 1 edge change
+      isLubeStrokeOK : Bool;   // response: 2 edge changes
+      isLubeStrokeOK_CartLow : Bool;   // response: 3 edge changes - cartridge soon empty
+      isOverpressure_Outlet1 : Bool;   // response: 4 edge changes - E2 outlet 1
+      isOverpressure_Outlet2 : Bool;   // response: 5 edge changes - E2 outlet 2
+      isCartridgeEmpty : Bool;   // response: 12 edge changes - auto-clears after shutdown
+      isVoltageError : Bool;   // response: 14 edge changes - E3 over/undervoltage
+      isInternalDeviceError : Bool;   // response: 15 edge changes - E4
+      isInadmissibleSignal : Bool;   // response: 16 edge changes - bad control signal
+      isEdgeCount : Int;   // raw edge count for diagnostics
+      isValid : Bool;   // a new feedback was decoded this cycle
+      isUnknown : Bool;   // edge count did not match any known response
+      diag_State : Int;   // expose main state for HMI
+      diag_QState : Int;   // expose qualification state for HMI
+      state : Int;   // main state machine
+      qState : Int;   // parallel qualification state machine
+      pulseWidth : Time;   // commanded pulse duration
+      edgeCount : Int;   // running edge change counter
+      prevPulseInput : Bool;   // previous scan value of PIN 4 for edge detection
+      deviceQualified : Bool;   // device ready held steady >500 ms
+      re_cmdLube {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // rising edge: lubrication stroke
+      re_cmdFill {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // rising edge: filling
+      re_cmdCancel {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // rising edge: cancel filling
+      re_cmdStatus {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // rising edge: status request
+      re_cmdAckErr {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // rising edge: acknowledge error
+      tPulse {InstructionName := 'TON_TIME'; LibVersion := '1.0'} : TON_TIME;   // output pulse timer
+      tReadyQual {InstructionName := 'TON_TIME'; LibVersion := '1.0'} : TON_TIME;   // device ready qualification timer
+      tFeedbackTimeout {InstructionName := 'TON_TIME'; LibVersion := '1.0'} : TON_TIME;   // silence detector for end of pulse train
+      tLubeTimeout {InstructionName := 'TON_TIME'; LibVersion := '1.0'} : TON_TIME;   // overall response timeout
+      tGap {InstructionName := 'TON_TIME'; LibVersion := '1.0'} : TON_TIME;   // inter-command gap timer
+   END_VAR
+
+
+BEGIN
+	// =====================================================================
+	// RISING EDGE DETECTION on command inputs (R_TRIG)
+	// =====================================================================
+	#re_cmdLube.CLK := #cmd_LubricationStroke;
+	#re_cmdFill.CLK := #cmd_Filling;
+	#re_cmdCancel.CLK := #cmd_CancelFilling;
+	#re_cmdStatus.CLK := #cmd_StatusRequest;
+	#re_cmdAckErr.CLK := #cmd_AcknowledgeError;
+	
+	#re_cmdLube();
+	#re_cmdFill();
+	#re_cmdCancel();
+	#re_cmdStatus();
+	#re_cmdAckErr();
+	
+	// =====================================================================
+	// PARALLEL STATE MACHINE: qState - device ready qualification
+	// Manages tReadyQual independently so TimerStart is one-shot on entry
+	// =====================================================================
+	CASE #qState OF
+	        // -----------------------------------------------------------------
+	        // 0 - NOT READY : PIN 4 is low, wait for it to go HIGH
+	        // -----------------------------------------------------------------
+	    0:
+	        #deviceQualified := FALSE;
+	        
+	        IF #i_DevicePin4 THEN
+	            // PIN 4 just went HIGH - start qualification timer (one-shot)
+	            "TimerReset"(#tReadyQual);
+	            "TimerStart"(timer := #tReadyQual,
+	                         PT := t#600ms);
+	            #qState := 1;
+	        END_IF;
+	        ;
+	        // -----------------------------------------------------------------
+	        // 1 - QUALIFYING : PIN 4 is HIGH, waiting for 600 ms steady
+	        // -----------------------------------------------------------------
+	    1:
+	        // keep timer running (TON needs IN=TRUE each scan)
+	        //"TimerStart"(timer := #tReadyQual,
+	        //            PT := t#600ms);
+	        
+	        IF NOT #i_DevicePin4 THEN
+	            // PIN 4 dropped before qualification - reset
+	            "TimerReset"(#tReadyQual);
+	            #deviceQualified := FALSE;
+	            #qState := 0;
+	        ELSIF #tReadyQual.Q THEN
+	            // qualified
+	            #deviceQualified := TRUE;
+	            #qState := 2;
+	        END_IF;
+	        ;
+	        // -----------------------------------------------------------------
+	        // 2 - QUALIFIED : device is ready
+	        //     When main state machine is active (states 20-50), PIN 4
+	        //     will pulse - we freeze qualification during those states
+	        // -----------------------------------------------------------------
+	    2:
+	        #deviceQualified := TRUE;
+	        
+	        // only monitor PIN 4 loss when main SM is IDLE or in FAULT
+	        IF (#state = 0) OR (#state = 99) THEN
+	            IF NOT #i_DevicePin4 THEN
+	                "TimerReset"(#tReadyQual);
+	                #deviceQualified := FALSE;
+	                #qState := 0;
+	            END_IF;
+	        END_IF;
+	        ;
+	END_CASE;
+	
+	// =====================================================================
+	// MAIN STATE MACHINE
+	// =====================================================================
+	CASE #state OF
+	        // -----------------------------------------------------------------
+	        // 0 - IDLE : waiting for a command
+	        // -----------------------------------------------------------------
+	    0:
+	        #q_ControlPulse := FALSE;
+	        #status_Busy := FALSE;
+	        #status_Ready := #deviceQualified;
+	        #status_DeviceNotReady := NOT #deviceQualified;
+	        
+	        // clear previous feedback valid/unknown flags
+	        #isValid := FALSE;
+	        #isUnknown := FALSE;
+	        
+	        IF #deviceQualified THEN
+	            // priority-encoded command acceptance
+	            IF #re_cmdLube.Q THEN
+	                #pulseWidth := t#100ms;
+	                #state := 5;
+	            ELSIF #re_cmdFill.Q THEN
+	                #pulseWidth := t#900ms;
+	                #state := 5;
+	            ELSIF #re_cmdCancel.Q THEN
+	                #pulseWidth := t#1000ms;
+	                #state := 5;
+	            ELSIF #re_cmdStatus.Q THEN
+	                #pulseWidth := t#1600ms;
+	                #state := 5;
+	            ELSIF #re_cmdAckErr.Q THEN
+	                #pulseWidth := t#1700ms;
+	                #state := 5;
+	            END_IF;
+	        END_IF;
+	        ;
+	        
+	    5:
+	        // reset timers for new run
+	        "TimerReset"(#tPulse);
+	        "TimerReset"(#tFeedbackTimeout);
+	        "TimerReset"(#tLubeTimeout);
+	        "TimerReset"(#tGap);
+	        
+	        #state := 10;
+	        
+	        // -----------------------------------------------------------------
+	        // 10 - SEND_PULSE : assert output, reset counters (transition)
+	        // -----------------------------------------------------------------
+	    10:
+	        #status_Busy := TRUE;
+	        #status_Ready := FALSE;
+	        #q_ControlPulse := TRUE;
+	        
+	        "TimerStart"(timer := #tPulse,
+	                     PT := #pulseWidth);
+	        
+	        // reset feedback state
+	        #edgeCount := 0;
+	        #prevPulseInput := #i_DevicePin4;
+	        
+	        // clear all feedback flags
+	        #isFillingCanceled := FALSE;
+	        #isLubeStrokeOK := FALSE;
+	        #isLubeStrokeOK_CartLow := FALSE;
+	        #isOverpressure_Outlet1 := FALSE;
+	        #isOverpressure_Outlet2 := FALSE;
+	        #isCartridgeEmpty := FALSE;
+	        #isVoltageError := FALSE;
+	        #isInternalDeviceError := FALSE;
+	        #isInadmissibleSignal := FALSE;
+	        #isValid := FALSE;
+	        #isUnknown := FALSE;
+	        #isEdgeCount := 0;
+	        
+	        #state := 20;
+	        ;
+	        // -----------------------------------------------------------------
+	        // 20 - WAIT_PULSE_DONE : hold output HIGH until timer expires
+	        // -----------------------------------------------------------------
+	    20:
+	        IF #tPulse.Q THEN
+	            "TimerReset"(#tPulse);
+	            // pulse complete - drop control signal
+	            #q_ControlPulse := FALSE;
+	            
+	            // one-shot: reset feedback and lube timeout timers for next state
+	            
+	            "TimerStart"(timer := #tFeedbackTimeout,
+	                         PT := t#500ms);
+	            
+	            "TimerStart"(timer := #tLubeTimeout,
+	                         PT := t#32s);
+	            
+	           
+	            #state := 30;
+	        END_IF;
+	        ;
+	        // -----------------------------------------------------------------
+	        // 30 - WAIT_FEEDBACK : count edge changes on PIN 4
+	        //      LUB-V responds with 100 ms pulse train.
+	        //      Count both rising and falling edges (edge changes).
+	        //      When no new edge for >500 ms the train is complete.
+	        // -----------------------------------------------------------------
+	
+	        
+	    30:
+	        #q_ControlPulse := FALSE;
+	        
+	        // edge detection on PIN 4
+	        
+	        IF #i_DevicePin4 AND NOT #prevPulseInput THEN
+	            #edgeCount := #edgeCount + 1;
+	            
+	            // restart silence timer on every edge (one-shot reset + start)
+	            "TimerReset"(#tFeedbackTimeout);
+	            "TimerStart"(timer := #tFeedbackTimeout,
+	                         PT := t#500ms);
+	        END_IF;
+	        
+	        //#prevPulseInput := #i_DevicePin4;
+	        
+	        // silence timer expired and we have edges -> pulse train complete
+	        IF #tFeedbackTimeout.Q AND (#edgeCount > 0) THEN
+	            #state := 40;
+	        END_IF;
+	        
+	        // overall timeout with no response at all
+	        IF #tLubeTimeout.Q AND (#edgeCount = 0) THEN
+	            #state := 99;
+	        END_IF;
+	        ;
+	        // -----------------------------------------------------------------
+	        // 40 - DECODE_FEEDBACK : map edge count to status BOOLs (transition)
+	        // -----------------------------------------------------------------
+	    40:
+	        #isEdgeCount := #edgeCount;
+	        #isValid := TRUE;
+	        
+	        CASE #edgeCount OF
+	            1:
+	                #isFillingCanceled := TRUE;
+	            2:
+	                #isLubeStrokeOK := TRUE;
+	            3:
+	                #isLubeStrokeOK_CartLow := TRUE;
+	            4:
+	                #isOverpressure_Outlet1 := TRUE;
+	            5:
+	                #isOverpressure_Outlet2 := TRUE;
+	            12:
+	                #isCartridgeEmpty := TRUE;
+	            14:
+	                #isVoltageError := TRUE;
+	            15:
+	                #isInternalDeviceError := TRUE;
+	            16:
+	                #isInadmissibleSignal := TRUE;
+	            ELSE
+	                #isUnknown := TRUE;
+	        END_CASE;
+	        
+	        // one-shot: start inter-command gap timer
+	        "TimerReset"(#tGap);
+	        "TimerStart"(timer := #tGap,
+	                     PT := t#600ms);
+	        #state := 50;
+	        ;
+	        // -----------------------------------------------------------------
+	        // 50 - INTER_CMD_GAP : enforce >= 500 ms silence before next cmd
+	        // -----------------------------------------------------------------
+	    50:
+	        // done the command, reset and return
+	        IF #tGap.Q THEN
+	            
+	            #cmd_AcknowledgeError := false;
+	            #cmd_CancelFilling := false;
+	            #cmd_Filling := false;
+	            #cmd_LubricationStroke := false;
+	            #cmd_StatusRequest := false;
+	            
+	            "TimerReset"(#tGap);
+	            #state := 0;
+	        END_IF;
+	        ;
+	        // -----------------------------------------------------------------
+	        // 99 - FAULT : device not ready or communication timeout
+	        // -----------------------------------------------------------------
+	    99:
+	        #q_ControlPulse := FALSE;
+	        #status_Busy := FALSE;
+	        #status_Ready := FALSE;
+	        #status_DeviceNotReady := TRUE;
+	        
+	        // auto-recover when device ready re-qualifies
+	        IF #deviceQualified THEN
+	            #state := 0;
+	        END_IF;
+	        ;
+	END_CASE;
+	
+	#prevPulseInput := #i_DevicePin4;
+	
+	// expose states for diagnostics / HMI
+	#diag_State := #state;
+	#diag_QState := #qState;
+	
+END_FUNCTION_BLOCK
+
