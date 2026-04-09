@@ -4,6 +4,7 @@ VERSION : 0.4
    VAR_INPUT 
       i_DevicePin4 : Bool;   // LUB-V PIN 4 output (ready / pulse feedback)
       cfg_FillingCycles : Int := 40;   // number of 100 ms strokes for a filling cycle
+      cfg_LegacyFillingTimeout : Time := t#900s;   // response timeout for legacy filling (hardware runs 40 strokes internally; default 15 min)
    END_VAR
 
    VAR 
@@ -13,6 +14,12 @@ VERSION : 0.4
       cmd_CancelFilling : Bool;   // cancel active filling loop after current stroke
       cmd_StatusRequest : Bool;   // status request / sign of presence (1600 ms pulse)
       cmd_AcknowledgeError : Bool;   // acknowledge error (1700 ms pulse)
+      // Legacy commands – devices manufactured between 2010 and 2022 use longer pulse widths.
+      // NOTE: The LUB-V auto-selects the protocol based on the first pulse it receives;
+      //       modern and legacy commands must NOT be mixed in the same session.
+      cmd_Legacy_LubricationStroke : Bool;   // legacy: 1 lubrication stroke (2000 ms pulse)
+      cmd_Legacy_Filling : Bool;   // legacy: filling function (12000 ms pulse, hardware manages 40 strokes)
+      cmd_Legacy_AcknowledgeError : Bool;   // legacy: acknowledge error (14000 ms pulse)
       status_Busy : Bool;   // state machine is processing
       status_Ready : Bool;   // idle, device ready, accepting commands
       status_DeviceNotReady : Bool;   // PIN 4 not qualified (steady HIGH >500 ms)
@@ -35,7 +42,8 @@ VERSION : 0.4
       diag_QState : Int;   // expose qualification state for HMI
       state : Int;   // main state machine
       qState : Int;   // parallel qualification state machine
-      pulseWidth : Time;   // commanded pulse duration (always t#100ms for lube/fill)
+      pulseWidth : Time;   // commanded pulse duration (set per-command in state 0)
+      cmdResponseTimeout : Time;   // per-command response timeout applied in state 20 (30 s modern; up to 15 min for legacy filling)
       edgeCount : Int;   // running rising-edge counter
       prevPulseInput : Bool;   // previous scan value of PIN 4 for edge detection
       deviceQualified : Bool;   // device ready held steady >500 ms
@@ -48,6 +56,9 @@ VERSION : 0.4
       re_cmdCancel {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // rising edge: cancel filling
       re_cmdStatus {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // rising edge: status request
       re_cmdAckErr {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // rising edge: acknowledge error
+      re_cmdLegacyLube {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // rising edge: legacy lubrication stroke
+      re_cmdLegacyFill {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // rising edge: legacy filling
+      re_cmdLegacyAckErr {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // rising edge: legacy acknowledge error
       tPulse {InstructionName := 'TON_TIME'; LibVersion := '1.0'} : TON_TIME;   // output pulse timer
       tReadyQual {InstructionName := 'TON_TIME'; LibVersion := '1.0'} : TON_TIME;   // device ready qualification timer
       tFeedbackTimeout {InstructionName := 'TON_TIME'; LibVersion := '1.0'} : TON_TIME;   // silence detector for end of pulse train
@@ -65,12 +76,18 @@ BEGIN
 	#re_cmdCancel.CLK := #cmd_CancelFilling;
 	#re_cmdStatus.CLK := #cmd_StatusRequest;
 	#re_cmdAckErr.CLK := #cmd_AcknowledgeError;
+	#re_cmdLegacyLube.CLK := #cmd_Legacy_LubricationStroke;
+	#re_cmdLegacyFill.CLK := #cmd_Legacy_Filling;
+	#re_cmdLegacyAckErr.CLK := #cmd_Legacy_AcknowledgeError;
 	
 	#re_cmdLube();
 	#re_cmdFill();
 	#re_cmdCancel();
 	#re_cmdStatus();
 	#re_cmdAckErr();
+	#re_cmdLegacyLube();
+	#re_cmdLegacyFill();
+	#re_cmdLegacyAckErr();
 	
 	// =====================================================================
 	// PARALLEL STATE MACHINE: qState - device ready qualification
@@ -136,6 +153,11 @@ BEGIN
 	        //   - Single stroke  : strokesTarget = 1
 	        //   - Filling cycle  : strokesTarget = cfg_FillingCycles (default 40)
 	        // Both send a 100 ms pulse per stroke, looping in state 50.
+	        //
+	        // Legacy commands (devices 2010–2022) use longer pulse widths:
+	        //   - Legacy stroke  : 2000 ms   (strokesTarget = 1)
+	        //   - Legacy filling : 12000 ms  (hardware loop, single response)
+	        //   - Legacy ack-err : 14000 ms
 	        // -----------------------------------------------------------------
 	    0:
 	        #q_ControlPulse := FALSE;
@@ -149,6 +171,9 @@ BEGIN
 	        #isUnknown := FALSE;
 	        
 	        IF #deviceQualified THEN
+	            // default response timeout; overridden below for legacy filling
+	            #cmdResponseTimeout := t#30s;
+	            
 	            // priority-encoded command acceptance
 	            IF #re_cmdLube.Q THEN
 	                // single lubrication stroke: one 100 ms pulse
@@ -188,6 +213,37 @@ BEGIN
 	                #state := 5;
 	            ELSIF #re_cmdAckErr.Q THEN
 	                #pulseWidth := t#1700ms;
+	                #strokesTarget := 0;
+	                #strokesDone := 0;
+	                #isFillingActive := FALSE;
+	                #state := 5;
+	            // ------------------------------------------------------------------
+	            // Legacy commands – devices manufactured between 2010 and 2022.
+	            // The LUB-V auto-selects the protocol based on the first pulse width
+	            // received; do NOT mix legacy and modern commands in the same session.
+	            // ------------------------------------------------------------------
+	            ELSIF #re_cmdLegacyLube.Q THEN
+	                // legacy: 1 lubrication stroke via 2000 ms pulse
+	                #pulseWidth := t#2000ms;
+	                #strokesTarget := 1;
+	                #strokesDone := 0;
+	                #isFillingActive := FALSE;
+	                #cancelFillingRequest := FALSE;
+	                #state := 5;
+	            ELSIF #re_cmdLegacyFill.Q THEN
+	                // legacy: filling function via 12000 ms pulse.
+	                // Hardware manages all 40 strokes internally and returns one response
+	                // at the end; extend the response timeout via cfg_LegacyFillingTimeout.
+	                #pulseWidth := t#12000ms;
+	                #cmdResponseTimeout := #cfg_LegacyFillingTimeout;
+	                #strokesTarget := 0;
+	                #strokesDone := 0;
+	                #isFillingActive := FALSE;
+	                #cancelFillingRequest := FALSE;
+	                #state := 5;
+	            ELSIF #re_cmdLegacyAckErr.Q THEN
+	                // legacy: acknowledge error via 14000 ms pulse
+	                #pulseWidth := t#14000ms;
 	                #strokesTarget := 0;
 	                #strokesDone := 0;
 	                #isFillingActive := FALSE;
@@ -255,9 +311,10 @@ BEGIN
 	            "TimerStart"(timer := #tFeedbackTimeout,
 	                         PT := t#500ms);
 	            
-	            // 30 s timeout per protocol; resets each stroke in filling loop
+	            // 30 s timeout per protocol; resets each stroke in filling loop.
+	            // Legacy filling uses cfg_LegacyFillingTimeout (set in state 0).
 	            "TimerStart"(timer := #tLubeTimeout,
-	                         PT := t#30s);
+	                         PT := #cmdResponseTimeout);
 	            
 	            #state := 30;
 	        END_IF;
@@ -360,6 +417,9 @@ BEGIN
 	                #cmd_Filling := FALSE;
 	                #cmd_LubricationStroke := FALSE;
 	                #cmd_StatusRequest := FALSE;
+	                #cmd_Legacy_LubricationStroke := FALSE;
+	                #cmd_Legacy_Filling := FALSE;
+	                #cmd_Legacy_AcknowledgeError := FALSE;
 	                #isFillingActive := FALSE;
 	                #state := 0;
 	            END_IF;
