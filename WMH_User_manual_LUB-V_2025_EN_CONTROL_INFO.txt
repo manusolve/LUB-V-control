@@ -1,0 +1,312 @@
+﻿
+8. Input and output signals – External control (PLC)
+To command the LUB-V via an external control (PLC), it is necessary to switch the LUB-V to pulse
+mode in the Settings menu (chap. 6.3.4).
+The LUB-V operates in pulse mode as a pulse-controlled lubrication system only if unalte-
+rable control signals of defned length are transmitted from the PLC to the LUB-V via PIN 2.
+The LUB-V signals the respective condition to the PLC via high/low levels, which must be tapped
+at PIN 4, and thus enables comprehensive control of the various conditions. For the integration of
+the LUB-V into an external control system, one input and one output each must be provided on
+the control side.
+DANGER
+Machine elements that are not lubricated can cause failures re-
+sulting in serious injury or death.
+• To operate the LUB-V via an external controller (PLC) in pulse mode, a pro-
+gram corresponding to the communication protocol must be created in the
+PLC.
+• After sending a control signal, the response signal of the LUB-V must be wai-
+ted for, evaluated and interpreted in order to prevent an uncontrolled failure
+of the LUB-V.
+8.1 Pin assignment – External control (PLC)
+PIN-Assignment-external control (PLC):
+2
+3
+PIN Assignment Colour
+1 +24 V DC brown
+3 Ground blue
+4 1
+Type: M12x1 female connector; 4-pin, A-coded
+61
+
+
+For the electrical connection to the external control system (PLC) of a machine, the LUB-V has
+a 4-pin interface, which is designed as a plug-in connection with the industry-standard M12x1
+connection.
+L The LUB-V can be switched off completely in pulse mode by switching off the supply voltage.
+The settings made are not lost in the process. After the supply voltage is reconnected, the LUB-V
+checks itself automatically and does not operate until it receives a control signal from the PLC.
+L The output signal at PIN 4 must be tapped at an external control for further processing. The
+maximum permissible output current must not exceed Imax < 20mA. No inductive load (e.g. relay)
+may be connected!
+L After a longer standstill of the LUB-V, it is recommended to trigger the control signal „1 lubrica-
+tion stroke“ twice manually (100 ms) (chap. 8.2.1).
+8.2 Input signals – External control (PLC)
+The LUB-V provides the following invariably defned control signals (input signals), which must be
+transmitted from the PLC to the LUB-V via PIN 2 of the electrical M12x1 interface as high level
+(+24 V DC).
+The control signals must be generated as high level (+24 V DC) by the external control (PLC) over
+specifc times, each with a tolerance of ±25 milliseconds.
+The LUB-V processes the following control/input signals:
+Signal length I
+Function Detail
+[ms]
+100 1 lubrication stroke Chap. 8.2.1
+900 Filling Chap. 8.2.2
+1000 Cancel flling Chap. 8.2.3
+1600 Status request (sign of presence) Chap. 8.2.4
+1700 Acknowledge error Chap. 8.2.5
+62
+
+
+
+8.2.1 Control/input signal „1 lubrication stroke“
+The control signal „1 lubrication stroke“ triggers a single lubrication stroke.
+U [V]
+24
+PIN 2
+t [ms]
+0
+signal length100 ms
+1
+Motor
+t [ms]
+0
+C1
+64
+
+
+Description:
+ The LUB-V is properly connected to an external controller via the electrical interface and con-
+nected to the power supply.
+ Pulse mode is activated on the LUB-V.
+ There are no errors on the LUB-V; the LUB-V is ready for operation.
+ The LUB-V sends a permanent output signal (high level) to PIN 4, which indicates readiness for
+operation to the external controller (PLC). This output signal must be present permanently and
+uninterruptedly for >500 milliseconds. Only if this prerequisite is fulfilled, an activation by the
+external control is possible at all.
+ The control signal „1 lubrication stroke“ with signal length of 100 (75 ... 125) milliseconds high
+level can be sent from the external control (PLC) to the LUB-V.
+ While a high level is present at PIN 2 of the LUB-V as an input signal from the external controller
+(PLC), the symbol indicating the pulse mode flashes in the display for the length of the signal.
+ Immediately after the control signal drops, the lubrication stroke C of the LUB-V starts and
+0.15 ml of lubricant is delivered to the outlet. The LUB-V monitors this lubrication stroke for the
+entire duration.
+sent or built up in the hydraulic system and the temperature. For the LUB-V, the lubrication stroke
+duration is 7...17 seconds (tC = 7...17 seconds).
+ During the lubrication stroke C, a numerical value 1...70 is shown in the display, which indicates
+the approximate back pressure in bar. The back pressure is displayed in relation to the outlet.
+ At the end of a lubrication stroke C, the LUB-V sends an output signal to PIN 4, which provides
+information about the past lubrication stroke as well as other states of the LUB-V for evaluation at
+a PLC or other external controller (see chapter 8.3).
+L At the earliest >500 milliseconds after the end of the response signal, a possible next control
+signal can be sent from the external control (PLC). For the characteristics and interpretation of the
+output signal, refer to Chap. 8.3. In the meantime, the LUB-V does not process any control signals.
+L If the integrated microelectronic of the LUB-V has detected an error during or immediately
+after the end of the lubrication stroke, it will be transmitted to the external control (PLC) by the
+corresponding output signal (chap. 8.3).
+65
+
+
+8.2.2 Control/input signal „Filling“
+The „Filling“ control signal triggers the flling function by the external control. A total of 40 lubrication
+strokes are performed automatically one after the other.
+U [V]
+24
+PIN 2
+t [ms]
+0
+signal length 900 ms
+1
+Motor
+t [ms]
+0
+tE39 C40
+C1 tE1 C2 tE2
+66
+
+
+Description:
+ The LUB-V is properly connected to an external controller via the electrical interface and con-
+nected to the power supply.
+ Pulse mode is activated on the LUB-V.
+ There are no errors on the LUB-V; the LUB-V is ready for operation.
+ The LUB-V sends a permanent output signal (high level) to PIN 4, which indicates readiness for
+operation to the external controller (PLC). This output signal must be present permanently and
+uninterruptedly for >500 milliseconds. Only if this prerequisite is fulfilled, an activation by the
+external control is possible at all.
+ The control signal „Filling“ with signal length of 900 (875 ... 925) milliseconds high level can be
+sent to the LUB-V from the external control (PLC).
+ While a high level is present at PIN 2 of the LUB-V as an input signal from the external controller
+(PLC), the symbol indicating the pulse mode flashes in the display for the length of the signal.
+ Immediately after the control signal drops, the lubrication stroke C of the LUB-V starts and
+0.15 ml of lubricant is delivered to the outlet. The LUB-V monitors this lubrication stroke for the
+entire duration.
+sent or built up in the hydraulic system and the temperature. For the LUB-V, the lubrication stroke
+duration is 7...17 seconds (tC = 7...17 seconds).
+ During the lubrication stroke C, a numerical value 1...70 is shown in the display, which indicates
+the approximate back pressure in bar. The back pressure is displayed in relation to the outlet.
+ At the end of a lubrication stroke C, the LUB-V sends an output signal to PIN 4, which provides
+information about the past lubrication stroke as well as other states of the LUB-V for evaluation at
+a PLC or other external controller (see chapter 8.3).
+ A total of 40 lubrication strokes C and 39 relaxation phases tE of two seconds length take place
+in immediate succession between the lubrication strokes. In the process, 40 x 0.15 ml = 6.0 ml of
+lubricant are delivered from the cartridge to the outlet.
+L At the earliest >500 milliseconds after the end of the last output signal, a possible next control
+signal can be sent from the external control (PLC). During the flling function, the control signal
+„Cancel flling“ (chap. 8.2.3) is the only control signal that the LUB-V can process.
+L If the integrated microelectronic of the LUB-V has detected an error during or immediately
+after the end of the lubrication stroke, it will be transmitted to the external control (PLC) by the
+corresponding output signal (chap. 8.3).
+L The filling function can be stopped with the „Cancel filling“ control signal, see section 8.2.3.
+67
+
+
+8.2.3 Control/input signal „Cancel flling“
+The „Cancel flling“ control signal can be used to stop the flling function activated by the „Filling“
+control signal. During the flling function, the „Cancel flling“ control signal is the only control signal
+that the LUB-V can process.
+Description:
+ The LUB-V is properly connected to an external controller via the electrical interface and con-
+nected to the power supply.
+ Pulse mode is activated on the LUB-V.
+ The filling function has been activated by the „Filling“ control signal.
+ The LUB-V carries out the filling function.
+ The control signal „Cancel filling“ with a signal length of 1000 (975 ... 1025) milliseconds high
+level can be sent from the external control (PLC) to the LUB-V during the relaxation time tE bet-
+ween two lubrication strokes C.
+ At the end of the transmission of the „Cancel filling“ control signal, the LUB-V stops the filling
+function directly. If the „Cancel filling“ control signal is sent during a lubrication stroke, the current
+lubrication stroke is completed and then the filling function is canceled.
+L At the earliest >500 milliseconds after the end of the response signal, a possible next control
+signal can be sent from the external control (PLC). For the characteristics and interpretation of the
+output signal, refer to Chap. 8.3. In the meantime, the LUB-V does not process any control signals.
+68
+
+
+8.2.4 Control/input signal „Status request“
+The „Status request (sign of presence)“ control signal can be used to check the last status of the
+LUB-V and the last lubrication stroke. In addition, the „Status request (sign of presence)“ control
+signal can be used to cyclically check whether the LUB-V can be reached.
+Description:
+ The LUB-V is properly connected to an external controller via the electrical interface and con-
+nected to the power supply.
+ Pulse mode is activated on the LUB-V.
+ A high level is applied to PIN 4 of LUB-V for >500 milliseconds.
+ The control signal „Status request (sign of presence)“ with signal length of 1600 (1575 ... 1625)
+milliseconds high level can be sent from the external control (PLC) to the LUB-V.
+ After the end of the transmission of the control signal „Status request (sign of presence)“, the
+LUB-V repeats the output signal of the past lubrication stroke on PIN 4.
+L At the earliest >500 milliseconds after the end of the response signal, a possible next control
+signal can be sent from the external control (PLC). For the characteristics and interpretation of the
+output signal, refer to Chap. 8.3. In the meantime, the LUB-V does not process any control signals.
+69
+
+
+8.2.5 Control/input signal „Acknowledge error“
+The „Acknowledge error“ control signal is used to acknowledge the E2 overpressure or E3 over/
+undervoltage errors after they have occurred previously and have been communicated by the
+LUB-V to the PLC. It is the only control signal that the LUB-V can process if an error message
+was sent in response to the previous motor run. Regardless of the principle possibility of remote
+acknowledgement of an error, it is essential to identify and eliminate the cause when an error
+message is present.
+Description:
+ The LUB-V is properly connected to an external controller via the electrical interface and con-
+nected to the power supply.
+ Pulse mode is activated on the LUB-V.
+ There is an E2 or E3 error at LUB-V.
+ The output signal sent from the LUB-V to PIN 4 to the external controller reports an error mes-
+sage E2 or E3 back.
+ An identification of the cause of the error message has taken place on the LUB-V and it has
+been eliminated.
+ The control signal „Acknowledge error“ with signal length of 1700 (1675 ... 1725) milliseconds
+high level can be sent from the external control (PLC) to the LUB-V.
+ After the end of the control signal, the integrated microelectronic checks the LUB-V independ-
+ently:
+Â If this internal check is successful, the error E2 or E3 is thus acknowledged and the LUB-V is
+ready for operation again.
+Â If this internal check is not successful, the LUB-V continues to send an output signal that
+defines an error. The error is still present. In this case, check the lubrication point and the LUB-V
+again and then send the „Acknowledge error“ control signal again. If the second check is again un-
+successful, disassemble the LUB-V with the lubricant cartridge screwed on and return the complete
+lubrication system to the manufacturer with a detailed description of the error.
+L LAttheearliest>500millisecondsaftertheendoftheresponsesignal,apossiblenextcontrol
+signal can be sent from the external control (PLC). For the characteristics and interpretation of the
+output signal, refer to Chap. 8.3. In the meantime, the LUB-V does not process any control signals.
+70
+
+
+8.3 Output signals – External control (PLC)
+The LUB-V has invariably defned output signals that are transmitted to the PLC via PIN 4 of the
+M12x1 electrical interface depending on the condition of the LUB-V.
+Each time a control signal is sent from the PLC to the LUB-V, the LUB-V sends an output signal after
+the action caused by the control signal has been executed, which must be waited for, evaluated
+and interpreted by a suitable PLC program.
+A high level (+ 24 V DC) is permanently present at PIN 4. During the transmission of the output
+signal, the signaling for information transmission changes several times from a high level to a low
+level and back again. After sending an output signal, a high level is permanently present at PIN 4.
+The following graphic shows an example of an output signal.
+U [V]
+24
+PIN 4
+t [ms]
+0
+100 ms 100 ms
+Information about the status of the LUB-V and about the past motor run must be evaluated via
+an evaluation of the number of edge changes of the output signal. For the evaluation of the edge
+changes, the rising edge (change of the output voltage at PIN 4 of the LUB-V from a low level
+(0 V) to a high level (+24 V DC)) must always be counted. The counted number of edge changes
+corresponds to a one-to-one state of the LUB-V.
+The output signal is sent with a frequency of f = 5 Hz. The low level is a voltage of + 0 to 5 V DC,
+the high level is a voltage between + 17 and + 27 V DC.
+71
+
+
+The following table shows all the output signals that are sent from the LUB-V to the external controller
+depending on its status.
+Number
+of edge Information Remedy
+changes
+1 Filling function canceled none necessary, purely informative
+2 Past lubrication stroke OK none necessary, purely informative
+3 Past lubrication stroke OK, Buy a new cartridge in time.
+cartridge soon empty
+cause
+Overpressure (E2) at outlet 1
+X
+Acknowledge error (Chap. 8.2.5)
+cause
+Overpressure (E2) at outlet 2
+X
+Acknowledge error (Chap. 8.2.5)
+(if present)
+L No need to acknowledge the error; it is au-
+tomatically cleared after the shutdown action.
+X
+Acknowledge error (Chap. 8.2.5)
+manufacturer together with the lubricant car-
+tridge and a description of the fault.
+signal received LUB-V for correctness.
+72
+
+
+DANGER
+Machine elements that are not lubricated can cause failures re-
+sulting in serious injury or death.
+• After sending a control signal, the response signal of the LUB-V must be wai-
+ted for, evaluated and interpreted in order to prevent an uncontrolled failure
+of the LUB-V.
+L If there is a low level at PIN 4 in pulse mode, but the operating voltage is connected, check
+the connection cable from external control to PIN 4 of the LUB-V. If you cannot detect a problem
+during the check, a serious device error has occurred that cannot be remedied by you on site. In
+this case, disassemble the LUB-V with the lubricant cartridge screwed on and return the complete
+lubrication system to the manufacturer with a detailed description of the fault.
+L The LUB-V always sends a specifc output signal within 30 sec. after sending an arbitrary control
+signal. If this is not the case and the LUB-V no longer responds to any control signal, a time-out
+has been detected. To check the communication readiness of the LUB-V in this case, send the
+control signal „Status request (sign of presence)“. If again >30 sec. pass without a response signal
+from the LUB-V, disconnect the supply voltage from the LUB-V for at least 10 sec. and send the
+control signal „Status request (sign of presence)“ again after reconnecting the supply voltage. If
+communication with the LUB-V is still not possible, disassemble the LUB-V with the lubricant car-
+tridge screwed on and return the complete lubrication system to the manufacturer with a detailed
+description of the error.
+73
